@@ -22,7 +22,7 @@ This is the **Node.js + Express REST API backend** for ConnectNeighbour. It hand
 ## 🗂️ Project Structure
 
 ```
-devTinder/
+connectneighbour-api/
 ├── src/
 │   ├── app.js                # Main Express app — CORS, middleware, router mounting, DB connect
 │   ├── config/
@@ -60,7 +60,7 @@ devTinder/
 ### 1. Clone & install
 ```bash
 git clone https://github.com/ANSHU-PALIWAL/connectneighbour-api.git
-cd devTinder
+cd connectneighbour-api
 npm install
 ```
 

@@ -1,7 +1,7 @@
 {
-  "name": "devtinder",
+  "name": "connectneighbour-api",
   "version": "1.0.0",
-  "description": "Tinder For Developers",
+  "description": "API backend for Connect Neighbour",
   "main": "index.js",
   "scripts": {
     "start": "node src/app.js",
