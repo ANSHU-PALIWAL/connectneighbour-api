@@ -1,8 +1,10 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const Group = require("../models/group");
 const GroupMessage = require("../models/groupMessage");
 const { userAuth } = require("../middlewares/auth");
 const { sendPushNotification } = require("../utils/push");
+const { getValidDistance } = require("../utils/constants");
 
 const groupRouter = express.Router();
 
@@ -12,22 +14,55 @@ groupRouter.post("/group", userAuth, async (req, res) => {
     const { name, description, lat, lng } = req.body;
     const loggedInUser = req.user;
 
-    if (!name || !lat || !lng) {
-      return res.status(400).json({ success: false, message: "Missing required fields" });
+    if (
+      typeof name !== "string" ||
+      name.trim().length === 0 ||
+      name.length > 100 ||
+      lat === undefined ||
+      lng === undefined
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid group name (up to 100 characters) and coordinates are required.",
+      });
+    }
+
+    if (description !== undefined && (typeof description !== "string" || description.length > 1000)) {
+      return res.status(400).json({
+        success: false,
+        message: "Description must be a valid string up to 1000 characters.",
+      });
+    }
+
+    const parsedLat = parseFloat(lat);
+    const parsedLng = parseFloat(lng);
+
+    if (
+      isNaN(parsedLat) ||
+      isNaN(parsedLng) ||
+      !Number.isFinite(parsedLat) ||
+      !Number.isFinite(parsedLng) ||
+      parsedLat < -90 ||
+      parsedLat > 90 ||
+      parsedLng < -180 ||
+      parsedLng > 180
+    ) {
+      return res.status(400).json({ success: false, message: "Invalid coordinates format." });
     }
 
     const group = new Group({
-      name,
-      description,
+      name: name.trim(),
+      description: description ? description.trim() : "",
       creatorId: loggedInUser._id,
       members: [loggedInUser._id],
       location: {
         type: "Point",
-        coordinates: [parseFloat(lng), parseFloat(lat)],
+        coordinates: [parsedLng, parsedLat],
       },
     });
 
     await group.save();
+    await group.populate("creatorId", "firstName lastName photoUrl");
 
     res.status(201).json({ success: true, message: "Group created successfully", data: group });
   } catch (err) {
@@ -45,7 +80,7 @@ groupRouter.get("/groups/nearby", userAuth, async (req, res) => {
     }
 
     const [lng, lat] = loggedInUser.location.coordinates;
-    const maxDistance = parseInt(req.query.distance) || 20000;
+    const maxDistance = getValidDistance(req.query.distance);
 
     const groups = await Group.aggregate([
       {
@@ -86,19 +121,46 @@ groupRouter.get("/groups/nearby", userAuth, async (req, res) => {
   }
 });
 
+// Get single group details
+groupRouter.get("/group/:groupId", userAuth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(groupId)) {
+      return res.status(400).json({ success: false, message: "Invalid Group ID format." });
+    }
+
+    const group = await Group.findById(groupId).populate("creatorId", "firstName lastName photoUrl");
+    if (!group) return res.status(404).json({ success: false, message: "Group not found" });
+
+    res.json({ success: true, data: group });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Join a group
 groupRouter.post("/group/:groupId/join", userAuth, async (req, res) => {
   try {
     const { groupId } = req.params;
     const loggedInUser = req.user;
 
+    if (!mongoose.Types.ObjectId.isValid(groupId)) {
+      return res.status(400).json({ success: false, message: "Invalid Group ID format." });
+    }
+
     const group = await Group.findById(groupId);
     if (!group) return res.status(404).json({ success: false, message: "Group not found" });
 
-    if (!group.members.includes(loggedInUser._id)) {
+    const isAlreadyMember = group.members.some(
+      (m) => m.toString() === loggedInUser._id.toString()
+    );
+
+    if (!isAlreadyMember) {
       group.members.push(loggedInUser._id);
       await group.save();
     }
+
+    await group.populate("creatorId", "firstName lastName photoUrl");
 
     res.json({ success: true, message: "Joined group successfully", data: group });
   } catch (err) {
@@ -112,10 +174,18 @@ groupRouter.get("/group/:groupId/messages", userAuth, async (req, res) => {
     const { groupId } = req.params;
     const loggedInUser = req.user;
 
+    if (!mongoose.Types.ObjectId.isValid(groupId)) {
+      return res.status(400).json({ success: false, message: "Invalid Group ID format." });
+    }
+
     const group = await Group.findById(groupId);
     if (!group) return res.status(404).json({ success: false, message: "Group not found" });
 
-    if (!group.members.includes(loggedInUser._id)) {
+    const isMember = group.members.some(
+      (m) => m.toString() === loggedInUser._id.toString()
+    );
+
+    if (!isMember) {
       return res.status(403).json({ success: false, message: "You are not a member of this group" });
     }
 

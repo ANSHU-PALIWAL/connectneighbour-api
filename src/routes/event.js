@@ -2,6 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const Event = require("../models/event");
 const { userAuth } = require("../middlewares/auth");
+const { getValidDistance } = require("../utils/constants");
 
 const eventRouter = express.Router();
 
@@ -11,21 +12,64 @@ eventRouter.post("/event", userAuth, async (req, res) => {
     const loggedInUser = req.user;
     const { title, description, eventType, date, lat, lng } = req.body;
 
-    if (!title || !description || !date || !lat || !lng) {
-      return res.status(400).json({ success: false, message: "Missing required fields." });
+    if (
+      typeof title !== "string" ||
+      !title.trim() ||
+      title.length > 150 ||
+      typeof description !== "string" ||
+      !description.trim() ||
+      description.length > 2000 ||
+      !date ||
+      lat === undefined ||
+      lng === undefined
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Title (up to 150 chars), description (up to 2000 chars), date, and coordinates are required.",
+      });
+    }
+
+    if (eventType !== undefined && (typeof eventType !== "string" || eventType.length > 50)) {
+      return res.status(400).json({
+        success: false,
+        message: "Event type must be a valid string up to 50 characters.",
+      });
+    }
+
+    const parsedDate = new Date(date);
+    if (isNaN(parsedDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid date format is required.",
+      });
+    }
+
+    const latitude = parseFloat(lat);
+    const longitude = parseFloat(lng);
+    if (
+      isNaN(latitude) ||
+      isNaN(longitude) ||
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      latitude < -90 ||
+      latitude > 90 ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      return res.status(400).json({ success: false, message: "Invalid latitude or longitude." });
     }
 
     const newEvent = new Event({
       creatorId: loggedInUser._id,
-      title,
-      description,
-      eventType: eventType || "Other",
-      date,
+      title: title.trim(),
+      description: description.trim(),
+      eventType: eventType ? eventType.trim() : "Other",
+      date: parsedDate,
       location: {
         type: "Point",
-        coordinates: [parseFloat(lng), parseFloat(lat)]
+        coordinates: [longitude, latitude],
       },
-      rsvpList: [loggedInUser._id] // Creator is automatically RSVP'd
+      rsvpList: [loggedInUser._id], // Creator is automatically RSVP'd
     });
 
     await newEvent.save();
@@ -53,7 +97,7 @@ eventRouter.get("/events/nearby", userAuth, async (req, res) => {
     }
 
     const [lng, lat] = loggedInUser.location.coordinates;
-    const maxDistance = parseInt(req.query.distance) || 20000; // Default 20km for events
+    const maxDistance = getValidDistance(req.query.distance); // Universal 150 km radius limit (clamped)
 
     const nearbyEvents = await Event.aggregate([
       {
@@ -114,16 +158,24 @@ eventRouter.post("/event/:eventId/rsvp", userAuth, async (req, res) => {
     const loggedInUser = req.user;
     const { eventId } = req.params;
 
+    if (!mongoose.Types.ObjectId.isValid(eventId)) {
+      return res.status(400).json({ success: false, message: "Invalid event ID." });
+    }
+
     const event = await Event.findById(eventId);
     if (!event) {
       return res.status(404).json({ success: false, message: "Event not found." });
     }
 
-    // Toggle RSVP
-    const isRSVPd = event.rsvpList.includes(loggedInUser._id);
+    // Toggle RSVP safely using string comparisons
+    const isRSVPd = event.rsvpList.some(
+      (id) => id.toString() === loggedInUser._id.toString()
+    );
     
     if (isRSVPd) {
-      event.rsvpList.pull(loggedInUser._id);
+      event.rsvpList = event.rsvpList.filter(
+        (id) => id.toString() !== loggedInUser._id.toString()
+      );
     } else {
       event.rsvpList.push(loggedInUser._id);
     }

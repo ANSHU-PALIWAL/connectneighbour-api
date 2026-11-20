@@ -4,6 +4,7 @@ const User = require("../models/user");
 const { userAuth } = require("../middlewares/auth");
 const ConnectionRequest = require("../models/connectionRequest");
 const Block = require("../models/block");
+const { MAX_DISCOVERY_RADIUS_METERS, getValidDistance } = require("../utils/constants");
 
 const userRouter = express.Router();
 
@@ -115,11 +116,30 @@ userRouter.get("/user/connections", userAuth, async (req, res) => {
   }
 });
 
-// 3. GET FEED
+// 3. GET FEED (True 150 km Geospatial Discovery)
 userRouter.get("/feed", userAuth, async (req, res) => {
   try {
     const loggedInUser = req.user;
 
+    // Check if user's location is valid (2 finite numbers, not [0, 0])
+    const coords = loggedInUser.location?.coordinates;
+    const hasValidLocation =
+      Array.isArray(coords) &&
+      coords.length === 2 &&
+      Number.isFinite(coords[0]) &&
+      Number.isFinite(coords[1]) &&
+      !(coords[0] === 0 && coords[1] === 0);
+
+    if (!hasValidLocation) {
+      return res.json({
+        success: true,
+        locationRequired: true,
+        message: "Enable location to discover neighbours within 150 km.",
+        data: [],
+      });
+    }
+
+    const [lng, lat] = coords;
     const page = parseInt(req.query.page) || 1;
     let limit = parseInt(req.query.limit) || 10;
     limit = limit > 50 ? 50 : limit;
@@ -133,7 +153,7 @@ userRouter.get("/feed", userAuth, async (req, res) => {
       $or: [{ blockerId: loggedInUser._id }, { blockedId: loggedInUser._id }],
     });
 
-    const hideUsersFromFeed = new Set();
+    const hideUsersFromFeed = new Set([loggedInUser._id.toString()]); // Hide ourselves
 
     connectionRequests.forEach((req) => {
       if (req.fromUserId) hideUsersFromFeed.add(req.fromUserId.toString());
@@ -145,15 +165,44 @@ userRouter.get("/feed", userAuth, async (req, res) => {
       if (block.blockedId) hideUsersFromFeed.add(block.blockedId.toString());
     });
 
-    const users = await User.find({
-      $and: [
-        { _id: { $nin: Array.from(hideUsersFromFeed) } },
-        { _id: { $ne: loggedInUser._id } },
-      ],
-    })
-      .select(USER_SAFE_Data)
-      .skip(skip)
-      .limit(limit);
+    // CRITICAL: Explicitly cast every ID in hideUsersFromFeed to new mongoose.Types.ObjectId(id)
+    const hiddenUsersObjectIds = Array.from(hideUsersFromFeed).map(
+      (id) => new mongoose.Types.ObjectId(id)
+    );
+
+    // True 150 km $geoNear aggregation
+    const users = await User.aggregate([
+      {
+        $geoNear: {
+          near: { type: "Point", coordinates: [lng, lat] },
+          distanceField: "distance",
+          maxDistance: MAX_DISCOVERY_RADIUS_METERS, // 150,000 meters
+          spherical: true,
+          query: {
+            _id: { $nin: hiddenUsersObjectIds },
+          },
+        },
+      },
+      {
+        $project: {
+          firstName: 1,
+          lastName: 1,
+          photoUrl: 1,
+          age: 1,
+          gender: 1,
+          about: 1,
+          skills: 1,
+          gallery: 1,
+          location: 1,
+          distance: 1,
+          isBusiness: 1,
+          businessName: 1,
+          businessCategory: 1,
+        },
+      },
+      { $skip: skip },
+      { $limit: limit },
+    ]);
 
     res.json({
       success: true,
@@ -165,7 +214,7 @@ userRouter.get("/feed", userAuth, async (req, res) => {
   }
 });
 
-// 🌍 4. GET RADAR FEED (Nearby Users)
+// 🌍 4. GET RADAR FEED (Nearby Users up to 150 km)
 userRouter.get("/feed/radar", userAuth, async (req, res) => {
   try {
     const loggedInUser = req.user;
@@ -179,7 +228,7 @@ userRouter.get("/feed/radar", userAuth, async (req, res) => {
       return res.status(400).json({
         success: false,
         message:
-          "Please enable location services in your browser to see developers near you.",
+          "Please enable location services in your browser to see neighbours near you.",
       });
     }
 
@@ -210,10 +259,10 @@ userRouter.get("/feed/radar", userAuth, async (req, res) => {
       (id) => new mongoose.Types.ObjectId(id),
     );
 
-    // Default radar radius to 100km (100,000 meters)
-    const maxDistance = parseInt(req.query.distance) || 100000;
+    // Universal 150 km radius limit (safely clamped from query)
+    const maxDistance = getValidDistance(req.query.distance);
 
-    // 2. The Magic GeoNear Aggregation
+    // 2. The GeoNear Aggregation (150 km)
     const nearbyUsers = await User.aggregate([
       {
         $geoNear: {
@@ -236,14 +285,14 @@ userRouter.get("/feed/radar", userAuth, async (req, res) => {
           about: 1,
           skills: 1,
           gallery: 1,
-          location: 1, // Let frontend map the true coordinates
+          location: 1, // Exact coordinates preserved
           distance: 1,
           isBusiness: 1,
           businessName: 1,
           businessCategory: 1, // Keep the calculated distance
         },
       },
-      { $limit: 100 }, // Max 100 people on the radar to prevent UI clutter
+      { $limit: 150 }, // Up to 150 neighbours on the radar
     ]);
 
     res.json({

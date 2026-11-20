@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const { userAuth } = require("../middlewares/auth");
 const Message = require("../models/message");
 const User = require("../models/user");
@@ -11,6 +12,10 @@ chatRouter.get("/chat/:targetUserId", userAuth, async (req, res) => {
   try {
     const { targetUserId } = req.params;
     const userId = req.user._id;
+
+    if (!targetUserId || typeof targetUserId !== "string" || !mongoose.Types.ObjectId.isValid(targetUserId)) {
+      return res.status(400).json({ message: "Invalid target user ID format." });
+    }
 
     // Verify connection
     const connection = await ConnectionRequest.findOne({
@@ -42,8 +47,8 @@ chatRouter.get("/chat/:targetUserId", userAuth, async (req, res) => {
 chatRouter.post("/chat/key", userAuth, async (req, res) => {
   try {
     const { publicKey } = req.body;
-    if (!publicKey) {
-      return res.status(400).json({ message: "Public key is required." });
+    if (!publicKey || typeof publicKey !== "string" || publicKey.length > 10000) {
+      return res.status(400).json({ message: "Public key must be a valid string under 10000 characters." });
     }
 
     const user = req.user;
@@ -61,6 +66,10 @@ chatRouter.get("/chat/key/:targetUserId", userAuth, async (req, res) => {
   try {
     const { targetUserId } = req.params;
     const userId = req.user._id;
+
+    if (!targetUserId || typeof targetUserId !== "string" || !mongoose.Types.ObjectId.isValid(targetUserId)) {
+      return res.status(400).json({ message: "Invalid target user ID format." });
+    }
 
     // Need to verify connection? Yes, for privacy
     const connection = await ConnectionRequest.findOne({

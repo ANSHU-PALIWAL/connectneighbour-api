@@ -1,17 +1,23 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const cookie = require("cookie");
+const mongoose = require("mongoose");
 const Message = require("../models/message");
 const GroupMessage = require("../models/groupMessage");
 const Group = require("../models/group");
 const User = require("../models/user");
 const ConnectionRequest = require("../models/connectionRequest");
+const Block = require("../models/block");
 const { sendPushNotification } = require("./push");
 
 const initializeSocket = (server) => {
+  const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
+    : ["http://localhost:5173"];
+
   const io = new Server(server, {
     cors: {
-      origin: "http://localhost:5173",
+      origin: allowedOrigins,
       credentials: true,
     },
   });
@@ -32,6 +38,12 @@ const initializeSocket = (server) => {
         return next(new Error("Authentication error: User not found"));
       }
 
+      const currentTokenVersion = user.tokenVersion ?? 0;
+      const jwtVersion = decodedObj.tokenVersion ?? 0;
+      if (jwtVersion !== currentTokenVersion) {
+        return next(new Error("Authentication error: Session revoked"));
+      }
+
       socket.user = user;
       next();
     } catch (err) {
@@ -48,6 +60,21 @@ const initializeSocket = (server) => {
     // Handle sending a text message
     socket.on("sendMessage", async ({ receiverId, receiverEncryptedData, senderEncryptedData }, callback) => {
       try {
+        if (!receiverId || typeof receiverId !== "string" || !mongoose.Types.ObjectId.isValid(receiverId)) {
+          if (callback) callback({ status: "error", message: "Invalid receiver ID format." });
+          return;
+        }
+
+        if (typeof receiverEncryptedData !== "string" || receiverEncryptedData.length === 0 || receiverEncryptedData.length > 15000000) {
+          if (callback) callback({ status: "error", message: "Invalid receiver encrypted payload." });
+          return;
+        }
+
+        if (typeof senderEncryptedData !== "string" || senderEncryptedData.length === 0 || senderEncryptedData.length > 15000000) {
+          if (callback) callback({ status: "error", message: "Invalid sender encrypted payload." });
+          return;
+        }
+
         // 1. Verify connection exists and is accepted
         const connection = await ConnectionRequest.findOne({
           $or: [
@@ -58,6 +85,19 @@ const initializeSocket = (server) => {
 
         if (!connection) {
           if (callback) callback({ status: "error", message: "Not connected with this user." });
+          return;
+        }
+
+        // Verify neither user has blocked the other
+        const isBlocked = await Block.findOne({
+          $or: [
+            { blockerId: userId, blockedId: receiverId },
+            { blockerId: receiverId, blockedId: userId },
+          ],
+        });
+
+        if (isBlocked) {
+          if (callback) callback({ status: "error", message: "Cannot send message to this user." });
           return;
         }
 
@@ -97,32 +137,51 @@ const initializeSocket = (server) => {
     });
 
     // Handle joining a group chat room
-    socket.on("joinGroup", async ({ groupId, userId }, callback) => {
+    socket.on("joinGroup", async ({ groupId }, callback) => {
       try {
+        if (!groupId || typeof groupId !== "string" || !mongoose.Types.ObjectId.isValid(groupId)) {
+          if (callback) callback({ status: "error", message: "Invalid Group ID format." });
+          return;
+        }
+
+        const authenticatedUserId = socket.user._id.toString();
         const group = await Group.findById(groupId);
-        if (group && group.members.includes(userId)) {
+        if (group && group.members.some((m) => m.toString() === authenticatedUserId)) {
           socket.join(`group_${groupId}`);
           if (callback) callback({ status: "success" });
         } else {
           if (callback) callback({ status: "error", message: "Not authorized" });
         }
       } catch (err) {
-        console.error(err);
+        console.error("Socket error in joinGroup:", err);
+        if (callback) callback({ status: "error", message: err.message });
       }
     });
 
     // Handle sending a group message
-    socket.on("sendGroupMessage", async ({ groupId, userId, text }, callback) => {
+    socket.on("sendGroupMessage", async ({ groupId, text }, callback) => {
       try {
+        if (!groupId || typeof groupId !== "string" || !mongoose.Types.ObjectId.isValid(groupId)) {
+          if (callback) callback({ status: "error", message: "Invalid Group ID format." });
+          return;
+        }
+
+        if (typeof text !== "string" || text.trim().length === 0 || text.length > 5000) {
+          if (callback) callback({ status: "error", message: "Message text must be between 1 and 5000 characters." });
+          return;
+        }
+
+        const authenticatedUserId = socket.user._id.toString();
         const group = await Group.findById(groupId);
-        if (!group || !group.members.includes(userId)) {
-          return callback({ status: "error", message: "Not authorized" });
+        if (!group || !group.members.some((m) => m.toString() === authenticatedUserId)) {
+          if (callback) callback({ status: "error", message: "Not authorized" });
+          return;
         }
 
         const message = new GroupMessage({
           groupId,
-          senderId: userId,
-          text,
+          senderId: socket.user._id,
+          text: text.trim(),
         });
 
         const savedMessage = await message.save();
@@ -133,18 +192,50 @@ const initializeSocket = (server) => {
 
         if (callback) callback({ status: "success", message: savedMessage });
       } catch (err) {
-        console.error(err);
+        console.error("Socket error in sendGroupMessage:", err);
         if (callback) callback({ status: "error", message: err.message });
       }
     });
 
     // Handle WebRTC Signaling for P2P Calls/Media
-    socket.on("webrtcSignal", ({ to, signal }) => {
-      // Forward the WebRTC signal (offer/answer/ice candidate) to the target user
-      socket.to(to).emit("webrtcSignal", {
-        from: userId,
-        signal,
-      });
+    socket.on("webrtcSignal", async ({ to, signal }) => {
+      try {
+        if (!to || typeof to !== "string" || !mongoose.Types.ObjectId.isValid(to) || !signal || typeof signal !== "object") return;
+
+        // Verify via DB that an "accepted" ConnectionRequest exists between socket.user._id and to
+        const connection = await ConnectionRequest.findOne({
+          $or: [
+            { fromUserId: userId, toUserId: to, status: "accepted" },
+            { fromUserId: to, toUserId: userId, status: "accepted" },
+          ],
+        });
+
+        if (!connection) {
+          // Drop unauthorized signals silently
+          return;
+        }
+
+        // Verify neither user has blocked the other in Block
+        const isBlocked = await Block.findOne({
+          $or: [
+            { blockerId: userId, blockedId: to },
+            { blockerId: to, blockedId: userId },
+          ],
+        });
+
+        if (isBlocked) {
+          // Drop blocked signals silently
+          return;
+        }
+
+        // Forward the WebRTC signal to the target user
+        io.to(to).emit("webrtcSignal", {
+          from: userId,
+          signal,
+        });
+      } catch (err) {
+        console.error("Socket error in webrtcSignal:", err);
+      }
     });
 
     socket.on("disconnect", () => {

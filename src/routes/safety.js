@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const Block = require("../models/block");
 const Report = require("../models/report");
 const User = require("../models/user");
@@ -12,6 +13,10 @@ safetyRouter.post("/block/:userId", userAuth, async (req, res) => {
   try {
     const loggedInUser = req.user;
     const { userId: blockedId } = req.params;
+
+    if (!blockedId || typeof blockedId !== "string" || !mongoose.Types.ObjectId.isValid(blockedId)) {
+      return res.status(400).json({ success: false, message: "Invalid user ID." });
+    }
 
     if (loggedInUser._id.toString() === blockedId) {
       return res.status(400).json({ success: false, message: "You cannot block yourself." });
@@ -39,7 +44,7 @@ safetyRouter.post("/block/:userId", userAuth, async (req, res) => {
     });
     await block.save();
 
-    // Optionally: Automatically reject any connection requests between them
+    // Automatically reject any connection requests between them
     await ConnectionRequest.updateMany(
       {
         $or: [
@@ -63,8 +68,12 @@ safetyRouter.post("/report/:userId", userAuth, async (req, res) => {
     const { userId: reportedId } = req.params;
     const { reason } = req.body;
 
-    if (!reason || reason.trim() === "") {
-      return res.status(400).json({ success: false, message: "Reason is required." });
+    if (!reportedId || typeof reportedId !== "string" || !mongoose.Types.ObjectId.isValid(reportedId)) {
+      return res.status(400).json({ success: false, message: "Invalid user ID." });
+    }
+
+    if (typeof reason !== "string" || !reason.trim() || reason.length > 1000) {
+      return res.status(400).json({ success: false, message: "Reason must be a valid string up to 1000 characters." });
     }
 
     if (loggedInUser._id.toString() === reportedId) {

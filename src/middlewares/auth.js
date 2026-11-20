@@ -14,12 +14,19 @@ const userAuth = async (req, res, next) => {
     }
 
     const decodedObj = await jwt.verify(token, process.env.JWT_SECRET_KEY);
-    const { _id } = decodedObj;
+    const { _id, tokenVersion: tokenVersionInJwt } = decodedObj;
 
     const user = await User.findById(_id);
 
     if (!user) {
       throw new Error("User Not Found");
+    }
+
+    const currentTokenVersion = user.tokenVersion ?? 0;
+    const jwtVersion = tokenVersionInJwt ?? 0;
+
+    if (jwtVersion !== currentTokenVersion) {
+      throw new Error("Session has been revoked. Please login again.");
     }
 
     req.user = user;

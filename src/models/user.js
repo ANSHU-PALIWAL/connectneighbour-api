@@ -125,6 +125,10 @@ const userSchema = new mongoose.Schema(
       type: [Object],
       default: [],
     },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,
@@ -138,9 +142,13 @@ userSchema.index({ location: "2dsphere" });
 userSchema.methods.getJWT = async function () {
   const user = this;
 
-  const token = await jwt.sign({ _id: user._id }, process.env.JWT_SECRET_KEY, {
-    expiresIn: "7d",
-  });
+  const token = await jwt.sign(
+    { _id: user._id, tokenVersion: user.tokenVersion ?? 0 },
+    process.env.JWT_SECRET_KEY,
+    {
+      expiresIn: "24h",
+    },
+  );
 
   return token;
 };

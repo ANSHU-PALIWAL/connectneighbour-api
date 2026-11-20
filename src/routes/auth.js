@@ -1,5 +1,7 @@
 const bcrypt = require("bcrypt");
 const express = require("express");
+const jwt = require("jsonwebtoken");
+const rateLimit = require("express-rate-limit");
 const User = require("../models/user");
 const { validateSignUpData } = require("../utils/validation");
 const { OAuth2Client } = require("google-auth-library");
@@ -8,24 +10,47 @@ const sendEmail = require("../utils/sendEmail");
 const authRouter = express.Router();
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-authRouter.post("/signup", async (req, res) => {
+const getCookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax",
+  maxAge: 24 * 60 * 60 * 1000, // 24 hours
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Too many attempts from this IP. Please try again after 15 minutes.",
+  },
+});
+
+authRouter.post("/signup", authLimiter, async (req, res) => {
   try {
     validateSignUpData(req);
 
     const { firstName, lastName, emailId, password } = req.body;
 
-    if (!firstName || !lastName) {
+    if (
+      typeof firstName !== "string" ||
+      typeof lastName !== "string" ||
+      typeof emailId !== "string" ||
+      typeof password !== "string"
+    ) {
       return res
         .status(400)
-        .json({ error: "First and Last name are required for manual signup." });
+        .json({ success: false, message: "Invalid input types." });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
     const user = new User({
-      firstName,
-      lastName,
-      emailId,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      emailId: emailId.trim().toLowerCase(),
       password: passwordHash,
     });
 
@@ -54,10 +79,9 @@ authRouter.post("/signup", async (req, res) => {
     const token = await savedUser.getJWT();
     const userObject = savedUser.toObject();
     delete userObject.password;
+    delete userObject.tokenVersion;
 
-    res.cookie("token", token, {
-      expires: new Date(Date.now() + 8 * 3600000),
-    });
+    res.cookie("token", token, getCookieOptions());
 
     return res.json({
       success: true,
@@ -75,15 +99,20 @@ authRouter.post("/signup", async (req, res) => {
   }
 });
 
-authRouter.post("/login", async (req, res) => {
+authRouter.post("/login", authLimiter, async (req, res) => {
   try {
     const { emailId, password } = req.body;
 
-    if (!emailId || !password) {
+    if (
+      typeof emailId !== "string" ||
+      typeof password !== "string" ||
+      !emailId.trim() ||
+      !password
+    ) {
       throw new Error("Email and Password are required.");
     }
 
-    const user = await User.findOne({ emailId: emailId });
+    const user = await User.findOne({ emailId: emailId.trim().toLowerCase() });
 
     if (!user) {
       throw new Error("Invalid credentials.");
@@ -100,12 +129,11 @@ authRouter.post("/login", async (req, res) => {
     if (isPasswordValid) {
       const token = await user.getJWT();
 
-      res.cookie("token", token, {
-        expires: new Date(Date.now() + 8 * 3600000),
-      });
+      res.cookie("token", token, getCookieOptions());
 
       const userObject = user.toObject();
       delete userObject.password;
+      delete userObject.tokenVersion;
 
       return res.json({
         success: true,
@@ -123,9 +151,16 @@ authRouter.post("/login", async (req, res) => {
   }
 });
 
-authRouter.post("/auth/google", async (req, res) => {
+authRouter.post("/auth/google", authLimiter, async (req, res) => {
   try {
     const { token } = req.body;
+
+    if (!token || typeof token !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Valid Google ID token is required.",
+      });
+    }
 
     const ticket = await googleClient.verifyIdToken({
       idToken: token,
@@ -178,15 +213,11 @@ authRouter.post("/auth/google", async (req, res) => {
 
     const jwtToken = await user.getJWT();
 
-    res.cookie("token", jwtToken, {
-      expires: new Date(Date.now() + 8 * 3600000),
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-    });
+    res.cookie("token", jwtToken, getCookieOptions());
 
     const userObject = user.toObject();
     delete userObject.password;
+    delete userObject.tokenVersion;
 
     return res.json({
       success: true,
@@ -202,12 +233,49 @@ authRouter.post("/auth/google", async (req, res) => {
   }
 });
 
-authRouter.post("/logout", (req, res) => {
-  res.cookie("token", null, { expires: new Date(Date.now()) });
-  return res.json({
-    success: true,
-    message: "Logout Successful 🎉",
-  });
+authRouter.post("/logout", async (req, res) => {
+  try {
+    const token = req.cookies?.token;
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY, {
+          ignoreExpiration: true,
+        });
+        if (decoded && decoded._id) {
+          await User.findByIdAndUpdate(decoded._id, {
+            $inc: { tokenVersion: 1 },
+          });
+        }
+      } catch (tokenErr) {
+        // Token might be malformed or unverified; proceed to clear cookie safely
+      }
+    }
+
+    res.cookie("token", null, {
+      ...getCookieOptions(),
+      maxAge: 0,
+      expires: new Date(0),
+    });
+
+    return res.json({
+      success: true,
+      message: "Logout Successful 🎉",
+    });
+  } catch (err) {
+    // Fail gracefully: ensure cookie is cleared regardless
+    try {
+      res.cookie("token", null, {
+        ...getCookieOptions(),
+        maxAge: 0,
+        expires: new Date(0),
+      });
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      message: "Logout Successful 🎉",
+    });
+  }
 });
 
 module.exports = authRouter;
