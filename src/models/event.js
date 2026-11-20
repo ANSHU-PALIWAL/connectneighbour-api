@@ -49,5 +49,7 @@ const eventSchema = new mongoose.Schema(
 
 // Create 2dsphere index on location for GeoNear queries
 eventSchema.index({ location: "2dsphere" });
+eventSchema.index({ creatorId: 1 });
+eventSchema.index({ date: 1 });
 
 module.exports = mongoose.model("Event", eventSchema);

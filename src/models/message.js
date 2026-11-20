@@ -26,8 +26,8 @@ const messageSchema = new mongoose.Schema(
   }
 );
 
-// Indexes for fast history queries
-messageSchema.index({ senderId: 1, receiverId: 1 });
-messageSchema.index({ receiverId: 1, senderId: 1 });
+// Indexes for fast history queries with sorting
+messageSchema.index({ senderId: 1, receiverId: 1, createdAt: 1 });
+messageSchema.index({ receiverId: 1, senderId: 1, createdAt: 1 });
 
 module.exports = mongoose.model("Message", messageSchema);

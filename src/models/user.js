@@ -135,7 +135,7 @@ const userSchema = new mongoose.Schema(
   },
 );
 
-userSchema.index({ firstName: 1, lastname: 1, gender: 1, age: 1 });
+userSchema.index({ firstName: 1, lastName: 1, gender: 1, age: 1 });
 
 userSchema.index({ location: "2dsphere" });
 

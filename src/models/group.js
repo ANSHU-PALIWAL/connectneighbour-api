@@ -38,5 +38,7 @@ const groupSchema = new mongoose.Schema(
 );
 
 groupSchema.index({ location: "2dsphere" });
+groupSchema.index({ creatorId: 1 });
+groupSchema.index({ members: 1 });
 
 module.exports = mongoose.model("Group", groupSchema);

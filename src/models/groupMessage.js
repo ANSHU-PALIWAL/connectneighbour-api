@@ -20,4 +20,7 @@ const groupMessageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Index for fast group chat history retrieval
+groupMessageSchema.index({ groupId: 1, createdAt: 1 });
+
 module.exports = mongoose.model("GroupMessage", groupMessageSchema);

@@ -3,12 +3,16 @@ const cookieParser = require("cookie-parser");
 const connectDB = require("./config/database");
 const cors = require("cors");
 const helmet = require("helmet");
+const compression = require("compression");
 require("dotenv").config();
 
 const app = express();
 
 // Trust proxy for rate limiting and secure cookies behind Cloudflare / Nginx
 app.set("trust proxy", 1);
+
+// Automatic Gzip response compression for JSON/text responses
+app.use(compression());
 
 // HTTP Security Headers via Helmet & disable x-powered-by
 app.use(
